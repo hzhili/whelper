@@ -5,7 +5,7 @@
 Windows 桌面助手：**一个进程、一个可执行文件**，同时提供三件事，外加一个托盘入口与设置页——
 
 - **划词工具条**：在任意应用里选中文字，光标附近弹出「复制 / 翻译」条。
-- **单屏显示桌面**：接管系统 `Win+D`，只最小化/还原**光标所在显示器**的窗口，再按一次按原 Z 序还原。[ShowDesktopOneMonitor](https://github.com/ruzrobert/ShowDesktopOneMonitor) 的 Rust 移植。
+- **单屏显示桌面**：接管系统 `Win+D`，只最小化/还原**光标所在显示器**的窗口，再按一次按原 Z 序还原并恢复原前台窗口。[ShowDesktopOneMonitor](https://github.com/ruzrobert/ShowDesktopOneMonitor) 的 Rust 移植。
 - **Alt+Tab 切换器**：接管系统 `Alt+Tab`，用**缩略图 / 网格**两种视图列出应用窗口，带实时预览、布局过渡动画与焦点切换。交互模型参考 [sigoden/window-switcher](https://github.com/sigoden/window-switcher)。
 - **托盘与设置**：常驻托盘图标（左键打开设置、右键菜单），设置页集中管理全部开关，支持**开机自启**；改动即时写回 `%APPDATA%\whelper\config.ini`。
 
@@ -26,7 +26,7 @@ Windows 桌面助手：**一个进程、一个可执行文件**，同时提供�
 - **托盘**：`Shell_NotifyIconW` + 自绘菜单，左键打开设置、右键「打开设置 / 开机自启 / 退出」；explorer 未就绪时自动重试。
 - **设置页**：左侧分类（常规 / 划词 / 显示桌面 / 切换器 / 关于）+ 右侧自绘开关与分段控件，改动即时保存，深浅色跟随主题。
 - **开机自启**：写入当前用户 `HKCU\...\Run`，值指向 `"<exe>" --autostart`；`--autostart` 会脱离控制台，登录时不弹黑框。
-- **图标资源**：多尺寸 `.ico` / `logo.png` 由 `tools/make-icon.ps1` 生成并 `include_bytes!` 编进程序，托盘、任务栏与关于页共用。
+- **图标资源**：多尺寸 `.ico` / `logo.png` 由 `tools/make-icon.ps1` 生成；程序运行时用 `include_bytes!` 加载托盘等图标，Windows 构建还会把 `.ico` 嵌入 EXE 资源，供桌面和开始菜单快捷方式读取。
 
 ## 架构
 
@@ -84,6 +84,20 @@ cargo run --release        # 仓库根；产物 target/release/whelper.exe
 常驻后在记事本/浏览器/Word 里拖选文字即可看到工具条；按 `Win+D` 只隐藏当前显示器；
 按 `Alt+Tab` 打开窗口切换器（按住 Alt 连按 Tab 循环，松开 Alt 切换，`` ` `` 换视图，`Esc` 取消）；
 点托盘图标打开设置页。
+
+## 构建安装包（Windows）
+
+项目使用 Rust 工具 `cargo-packager` 生成 NSIS 安装程序；首次打包会自动下载并校验 NSIS 工具链。
+安装程序按当前用户安装，不需要管理员权限；支持中文和英文，会创建开始菜单快捷方式，安装完成页可选择创建桌面快捷方式或立即启动。
+卸载程序不会删除 `%APPDATA%\whelper` 中的用户配置。
+
+```powershell
+cargo install cargo-packager --version 0.11.8 --locked
+.\package.ps1
+```
+
+安装包输出到 `dist/`，文件名带有应用版本与目标架构，例如 `whelper_0.1.0_x64-setup.exe`。
+配置位于 `crates/whelper/Cargo.toml` 的 `[package.metadata.packager]` 与 `[package.metadata.packager.nsis]`。
 
 ## 设置与配置
 
@@ -191,7 +205,7 @@ clipboard_changed=false
 7. **预览用 DWM 实时缩略图**：`DwmRegisterThumbnail` 由合成器直接把源窗口画面画进卡片，零抓屏开销、内容实时更新；每帧同步目标矩形（跟随布局插值）与 `opacity`（跟随淡入淡出），滚出/关闭即注销。缩略图画在绘制面之上、只能直角，所以选中环画在卡片外缘、标题行放在缩略图下方。
 8. **配置单一来源**：`whelper-config` 定义全部开关并负责 INI 解析/生成；组件每次打开弹窗或收到按键时读一份快照，设置页写盘后递增 `revision`，工具条定时器据此立即换主题。
 9. **托盘 / 设置与弹窗同一套绘制**：设置页不堆标准控件，而是和工具条、切换器共用 GDI 双缓冲、圆角、DPI 与深浅色；绘制与点击共用同一份 `plan`，看到的位置就是点得到的位置。
-10. **图标是编进程序的资源**：`tools/make-icon.ps1` 生成 9 个尺寸的 ICO，`include_bytes!` + `CreateIconFromResourceEx` 直接建 `HICON`，不需要 `.rc` / `rc.exe`，也不往磁盘写临时文件。
+10. **图标由同一份 ICO 提供**：`tools/make-icon.ps1` 生成 9 个尺寸；运行时通过 `include_bytes!` + `CreateIconFromResourceEx` 直接建 `HICON`，不写临时文件。Windows 构建另用 `winresource` 将 ICO 写入 EXE 的 PE 资源，供资源管理器显示程序和快捷方式图标。
 11. **边界**：`text-picker` 不引入 `show-desktop` / `window-switcher`，两个桌面组件之间也互不依赖；托盘与设置只通过 `whelper-common::win32::applink` 的类名/消息约定与组件往来；共性只放 `whelper-common`。
 12. **切换器视觉取“卡片浮空”**（windows-helper 同款）：覆盖窗口用 `UpdateLayeredWindow` + 32bpp DIB 自绘——
     背景完全透明（面板矩形只用于布局），带 1px 描边与实色底的 8px 圆角卡片按圆角回填不透明 alpha，

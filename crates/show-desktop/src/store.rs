@@ -7,11 +7,17 @@ use std::collections::HashMap;
 
 use whelper_common::geometry::MonitorId;
 
-use crate::window::WindowEntry;
+use crate::window::{WindowEntry, WindowId};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedState {
+    pub windows: Vec<WindowEntry>,
+    pub foreground: Option<WindowId>,
+}
 
 #[derive(Debug, Default)]
 pub struct StateStore {
-    saved: HashMap<MonitorId, Vec<WindowEntry>>,
+    saved: HashMap<MonitorId, SavedState>,
 }
 
 impl StateStore {
@@ -19,18 +25,23 @@ impl StateStore {
         Self::default()
     }
 
-    /// 取出并清除某个显示器的记忆。切换时无论走向哪条分支，旧记忆都不再有效。
-    pub fn take(&mut self, monitor: MonitorId) -> Option<Vec<WindowEntry>> {
+    /// 取出并清除某个显示器的窗口与前台记忆。旧记忆只参与一次切换决策。
+    pub fn take(&mut self, monitor: MonitorId) -> Option<SavedState> {
         self.saved.remove(&monitor)
     }
 
     /// 只读查看，供预览（不改状态）使用。
-    pub fn get(&self, monitor: MonitorId) -> Option<&[WindowEntry]> {
-        self.saved.get(&monitor).map(Vec::as_slice)
+    pub fn get(&self, monitor: MonitorId) -> Option<&SavedState> {
+        self.saved.get(&monitor)
     }
 
-    pub fn save(&mut self, monitor: MonitorId, snapshot: Vec<WindowEntry>) {
-        self.saved.insert(monitor, snapshot);
+    pub fn save(
+        &mut self,
+        monitor: MonitorId,
+        windows: Vec<WindowEntry>,
+        foreground: Option<WindowId>,
+    ) {
+        self.saved.insert(monitor, SavedState { windows, foreground });
     }
 
     pub fn clear(&mut self) {
@@ -57,9 +68,12 @@ mod tests {
     #[test]
     fn take_removes_the_entry() {
         let mut store = StateStore::new();
-        store.save(MONITOR_A, snapshot());
+        store.save(MONITOR_A, snapshot(), None);
         assert!(store.get(MONITOR_A).is_some());
-        assert_eq!(store.take(MONITOR_A), Some(snapshot()));
+        assert_eq!(
+            store.take(MONITOR_A),
+            Some(SavedState { windows: snapshot(), foreground: None })
+        );
         assert!(store.get(MONITOR_A).is_none());
         assert!(store.is_empty());
     }
@@ -67,11 +81,14 @@ mod tests {
     #[test]
     fn monitors_are_independent() {
         let mut store = StateStore::new();
-        store.save(MONITOR_A, snapshot());
-        store.save(MONITOR_B, Vec::new());
-        assert_eq!(store.get(MONITOR_A).map(<[WindowEntry]>::len), Some(1));
-        assert_eq!(store.get(MONITOR_B).map(<[WindowEntry]>::len), Some(0));
-        assert_eq!(store.take(MONITOR_B), Some(Vec::new()));
+        store.save(MONITOR_A, snapshot(), None);
+        store.save(MONITOR_B, Vec::new(), None);
+        assert_eq!(store.get(MONITOR_A).map(|state| state.windows.len()), Some(1));
+        assert_eq!(store.get(MONITOR_B).map(|state| state.windows.len()), Some(0));
+        assert_eq!(
+            store.take(MONITOR_B),
+            Some(SavedState { windows: Vec::new(), foreground: None })
+        );
         assert!(store.get(MONITOR_A).is_some());
     }
 

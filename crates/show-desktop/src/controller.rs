@@ -89,13 +89,21 @@ impl<B: DesktopBackend> ShowDesktop<B> {
 
     /// 对指定显示器切换。
     pub fn toggle(&mut self, monitor: MonitorId) -> ToggleReport {
+        let foreground = self.backend.foreground_window();
         let current = self.entries_on(monitor);
-        // 与上游一致：记忆只服务本次决策，无论走哪条分支都先取走
-        // （还原分支作废，最小化分支由新清单覆盖）。
+        // 与上游一致：记忆只服务本次决策，无论走向哪条分支都先取走。
         let remembered = self.store.take(monitor);
+        let previous_windows = remembered
+            .as_ref()
+            .map(|snapshot| snapshot.windows.as_slice());
 
-        match plan::decide(&current, remembered.as_deref()) {
+        match plan::decide(&current, previous_windows) {
             PlanAction::Minimize(targets) => {
+                let foreground = foreground.filter(|foreground| {
+                    current.iter().any(|entry| {
+                        entry.id == *foreground && entry.state == WindowState::Visible
+                    })
+                });
                 for window in &targets {
                     self.backend.minimize(*window);
                 }
@@ -105,12 +113,15 @@ impl<B: DesktopBackend> ShowDesktop<B> {
                     considered: current.len(),
                     affected: targets.len(),
                 };
-                self.store.save(monitor, current);
+                self.store.save(monitor, current, foreground);
                 report
             }
             PlanAction::Restore(targets) => {
                 for window in &targets {
                     self.backend.restore(*window);
+                }
+                if let Some(foreground) = remembered.and_then(|snapshot| snapshot.foreground) {
+                    let _ = self.backend.activate(foreground);
                 }
                 ToggleReport {
                     monitor,
@@ -130,7 +141,11 @@ impl<B: DesktopBackend> ShowDesktop<B> {
             .iter()
             .map(|window| WindowEntry { id: window.id, state: window.state })
             .collect();
-        let action = plan::decide(&entries, self.store.get(monitor));
+        let remembered = self
+            .store
+            .get(monitor)
+            .map(|snapshot| snapshot.windows.as_slice());
+        let action = plan::decide(&entries, remembered);
 
         Ok(Preview {
             monitor,

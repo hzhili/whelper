@@ -31,6 +31,12 @@ pub trait DesktopBackend {
     /// 窗口当前状态（可见 / 最小化 / 不可见）。
     fn window_state(&self, window: WindowId) -> WindowState;
 
+    /// 当前前台窗口；用于在最小化前保存并在还原后恢复原焦点。
+    fn foreground_window(&self) -> Option<WindowId>;
+
+    /// 显示并激活窗口，返回它是否成功成为前台窗口。
+    fn activate(&self, window: WindowId) -> bool;
+
     /// 窗口标题，仅用于日志和预览输出。
     fn window_title(&self, window: WindowId) -> String;
 

@@ -74,8 +74,8 @@ powershell -ExecutionPolicy Bypass -File tools/make-icon.ps1
 设计是圆角方块 + 蓝紫渐变（`#2F6FEB → #7C3AED`）+ 白色描边 “W”，与工具条/切换器的强调色一致；
 16px 下只保留粗 W，保证托盘小图标可辨认。
 
-加载走 `whelper-common::win32::icon`：解析 ICO 目录 → 选最接近 `SM_CXICON` / `SM_CXSMICON` 的一项 →
-`CreateIconFromResourceEx`；图标 `include_bytes!` 编进程序，不需要 `.rc` / `rc.exe`，也不写临时文件。
+运行时加载走 `whelper-common::win32::icon`：解析 ICO 目录 → 选最接近 `SM_CXICON` / `SM_CXSMICON` 的一项 →
+`CreateIconFromResourceEx`；图标通过 `include_bytes!` 编进程序，不写临时文件。Windows 构建还会用 `winresource` 将同一 ICO 嵌入 EXE 的 PE 资源，供资源管理器和快捷方式读取。
 
 ## 嵌入方式
 

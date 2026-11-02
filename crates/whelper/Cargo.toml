@@ -11,3 +11,22 @@ window-switcher = { path = "../window-switcher" }
 whelper-common = { path = "../whelper-common" }
 whelper-config = { path = "../whelper-config" }
 whelper-shell = { path = "../whelper-shell" }
+
+[build-dependencies]
+winresource = "0.1"
+
+[package.metadata.packager]
+product-name = "whelper"
+identifier = "com.hzhili.whelper"
+publisher = "hzhili"
+description = "Windows desktop helper for text selection, desktop management, and Alt+Tab switching"
+homepage = "https://github.com/hzhili/whelper"
+formats = ["nsis"]
+out-dir = "../../dist"
+icons = ["../whelper-shell/assets/whelper.ico"]
+before-packaging-command = "cargo build --release --locked -p whelper"
+
+[package.metadata.packager.nsis]
+installMode = "currentUser"
+installer-icon = "../whelper-shell/assets/whelper.ico"
+languages = ["SimpChinese", "English"]

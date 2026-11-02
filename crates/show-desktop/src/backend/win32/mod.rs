@@ -6,9 +6,9 @@
 mod enumeration;
 mod ops;
 
-use windows::Win32::UI::WindowsAndMessaging::{SW_MINIMIZE, SW_RESTORE};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_MINIMIZE, SW_RESTORE};
 use whelper_common::geometry::{MonitorId, MonitorInfo};
-use whelper_common::win32::monitor;
+use whelper_common::win32::{monitor, window as common_window};
 
 use crate::backend::DesktopBackend;
 use crate::window::{state_from_style, WindowId, WindowState};
@@ -37,6 +37,15 @@ impl DesktopBackend for Win32Backend {
 
     fn window_state(&self, window: WindowId) -> WindowState {
         state_from_style(ops::style(window))
+    }
+
+    fn foreground_window(&self) -> Option<WindowId> {
+        let foreground = unsafe { GetForegroundWindow() };
+        (!foreground.0.is_null()).then_some(WindowId(foreground.0 as isize))
+    }
+
+    fn activate(&self, window: WindowId) -> bool {
+        common_window::activate(window)
     }
 
     fn window_title(&self, window: WindowId) -> String {

@@ -2,7 +2,7 @@
 //!
 //! 顺序即 Z 序（与 `EnumWindows` 一致），最小化/还原只改状态并记录调用顺序。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use whelper_common::geometry::{MonitorId, MonitorInfo, Rect};
 
@@ -13,6 +13,7 @@ use crate::window::{WindowId, WindowState};
 pub enum Call {
     Minimize(WindowId),
     Restore(WindowId),
+    Activate(WindowId),
 }
 
 #[derive(Debug, Clone)]
@@ -26,13 +27,19 @@ struct FakeWindow {
 #[derive(Debug)]
 pub struct MemoryBackend {
     cursor: MonitorId,
+    foreground: Cell<Option<WindowId>>,
     windows: RefCell<Vec<FakeWindow>>,
     calls: RefCell<Vec<Call>>,
 }
 
 impl MemoryBackend {
     pub fn new(cursor: MonitorId) -> Self {
-        Self { cursor, windows: RefCell::new(Vec::new()), calls: RefCell::new(Vec::new()) }
+        Self {
+            cursor,
+            foreground: Cell::new(None),
+            windows: RefCell::new(Vec::new()),
+            calls: RefCell::new(Vec::new()),
+        }
     }
 
     /// 追加一个窗口；调用顺序即 Z 序（先加的在最上层）。
@@ -64,6 +71,10 @@ impl MemoryBackend {
 
     pub fn set_cursor(&mut self, monitor: MonitorId) {
         self.cursor = monitor;
+    }
+
+    pub fn set_foreground(&mut self, window: Option<WindowId>) {
+        self.foreground.set(window);
     }
 
     pub fn state_of(&self, id: WindowId) -> Option<WindowState> {
@@ -102,6 +113,19 @@ impl DesktopBackend for MemoryBackend {
         self.state_of(window).unwrap_or(WindowState::Disabled)
     }
 
+    fn foreground_window(&self) -> Option<WindowId> {
+        self.foreground.get()
+    }
+
+    fn activate(&self, window: WindowId) -> bool {
+        let exists = self.windows.borrow().iter().any(|candidate| candidate.id == window);
+        if exists {
+            self.foreground.set(Some(window));
+            self.calls.borrow_mut().push(Call::Activate(window));
+        }
+        exists
+    }
+
     fn window_title(&self, window: WindowId) -> String {
         self.windows
             .borrow()
@@ -113,11 +137,15 @@ impl DesktopBackend for MemoryBackend {
 
     fn minimize(&self, window: WindowId) {
         self.update_state(window, WindowState::Minimized);
+        if self.foreground.get() == Some(window) {
+            self.foreground.set(None);
+        }
         self.calls.borrow_mut().push(Call::Minimize(window));
     }
 
     fn restore(&self, window: WindowId) {
         self.update_state(window, WindowState::Visible);
+        self.foreground.set(Some(window));
         self.calls.borrow_mut().push(Call::Restore(window));
     }
 

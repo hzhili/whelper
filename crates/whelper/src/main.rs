@@ -1,3 +1,6 @@
+// Release 构建使用 GUI 子系统，避免常驻程序弹出控制台；Debug 构建保留终端日志。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! whelper：单一可执行文件、单一进程，同时运行三个桌面组件与一个托盘外壳。
 //!
 //! - `text-picker`（划词工具条）：创建工具条窗口并跑主消息循环，进程生命周期由它决定；
