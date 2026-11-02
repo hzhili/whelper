@@ -9,7 +9,7 @@
 //! 共用同一份实现）。
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -24,7 +24,6 @@ const VK_D: u32 = 0x44;
 
 /// 触发时投递 [`MSG_TOGGLE`] 的目标窗口（同进程的服务消息窗口）。
 static TARGET_WINDOW: AtomicIsize = AtomicIsize::new(0);
-static WIN_HELD: AtomicBool = AtomicBool::new(false);
 static STATE: Mutex<WinDState> = Mutex::new(WinDState { d_held: false });
 
 /// 键盘钩子里对 Win+D 的处理结果。
@@ -80,7 +79,6 @@ pub fn install(target: HWND) -> bool {
 pub fn uninstall() {
     hook::remove_handler(on_key);
     TARGET_WINDOW.store(0, Ordering::SeqCst);
-    WIN_HELD.store(false, Ordering::SeqCst);
     *STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = WinDState::default();
 }
 
@@ -97,9 +95,6 @@ fn on_key(event: &KeyEvent) -> bool {
         let mut state = STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *state = WinDState::default();
         return false;
-    }
-    if matches!(event.vk, VK_LWIN | VK_RWIN) {
-        WIN_HELD.store(event.is_down, Ordering::SeqCst);
     }
     if event.vk != VK_D {
         return false;
@@ -133,8 +128,9 @@ fn on_key(event: &KeyEvent) -> bool {
 }
 
 fn win_held() -> bool {
-    // 优先用钩子里跟踪的状态，`GetAsyncKeyState` 只兜底“钩子安装时 Win 已经按下”。
-    WIN_HELD.load(Ordering::SeqCst) || modifier_down(VK_LWIN) || modifier_down(VK_RWIN)
+    // 使用系统当前键态，避免内部缓存因功能开关切换或丢失 keyup 而残留，
+    // 导致后续 Alt+D 被误判为 Win+D。查询的是修饰键，当前钩子事件是 D。
+    modifier_down(VK_LWIN) || modifier_down(VK_RWIN)
 }
 
 #[cfg(test)]
