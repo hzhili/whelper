@@ -1,0 +1,28 @@
+[package]
+name = "text-picker"
+version = "0.1.0"
+edition = "2021"
+description = "划词取词器：全局钩子取词后弹出复制/翻译工具条"
+
+[dependencies]
+whelper-common = { path = "../whelper-common" }
+whelper-config = { path = "../whelper-config" }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+] }
+ureq = "2"

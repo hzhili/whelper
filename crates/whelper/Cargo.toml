@@ -1,0 +1,13 @@
+[package]
+name = "whelper"
+version = "0.1.0"
+edition = "2021"
+description = "whelper：单进程桌面助手，一个 exe 内同时运行划词工具条、单屏显示桌面、Alt+Tab 切换器与托盘设置页"
+
+[dependencies]
+show-desktop = { path = "../show-desktop" }
+text-picker = { path = "../text-picker" }
+window-switcher = { path = "../window-switcher" }
+whelper-common = { path = "../whelper-common" }
+whelper-config = { path = "../whelper-config" }
+whelper-shell = { path = "../whelper-shell" }

@@ -1,0 +1,7 @@
+[package]
+name = "whelper-config"
+version = "0.1.0"
+edition = "2021"
+description = "whelper 的全局配置：INI 持久化 + 进程内共享，供设置页与各组件读取"
+
+[dependencies]

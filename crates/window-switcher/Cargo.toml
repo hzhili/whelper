@@ -1,0 +1,25 @@
+[package]
+name = "window-switcher"
+version = "0.1.0"
+edition = "2021"
+description = "Alt+Tab 窗口切换器：缩略图/网格两种视图、窗口预览与焦点切换（思路参考 sigoden/window-switcher）"
+
+[dependencies]
+whelper-common = { path = "../whelper-common" }
+whelper-config = { path = "../whelper-config" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Xps",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }

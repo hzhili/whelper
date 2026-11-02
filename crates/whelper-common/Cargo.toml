@@ -1,0 +1,22 @@
+[package]
+name = "whelper-common"
+version = "0.1.0"
+edition = "2021"
+description = "whelper 的通用底座：几何/窗口纯逻辑 + 字符串/显示器/单实例/键盘钩子/窗口枚举等 Win32 基础封装"
+
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_HiDpi",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }

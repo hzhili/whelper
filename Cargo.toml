@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/whelper-common",
+    "crates/whelper-config",
+    "crates/text-picker",
+    "crates/show-desktop",
+    "crates/window-switcher",
+    "crates/whelper-shell",
+    "crates/whelper",
+]
+# 仓库根 `cargo run` 构建并运行唯一可执行文件 whelper.exe（三个组件作为库链入）。
+default-members = ["crates/whelper"]
+
+# release 优化配置必须放在 workspace 根：成员的 [profile] 会被 Cargo 忽略。
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
