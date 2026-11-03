@@ -125,6 +125,13 @@ struct IconCache {
     translate: Mask,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureAction {
+    ShowBar,
+    Copy,
+    Translate,
+}
+
 struct CapturePayload {
     text: String,
     /// 终端类窗口：先弹条、不复制，等用户点按钮再取词（避免 Ctrl+C 取消选区）。
@@ -134,6 +141,8 @@ struct CapturePayload {
     anchor: POINT,
     target: HWND,
     generation: u64,
+    request: capture::Request,
+    action: CaptureAction,
 }
 
 /// 工具条定位点：优先用选区矩形的「上边中点」，UIA 没给矩形时退回鼠标位置。
@@ -268,6 +277,7 @@ impl App {
 
     fn cancel_pending(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        capture::cancel_pending();
     }
 
     fn hide(&mut self, reason: &str) {
@@ -373,16 +383,26 @@ impl App {
     }
 
     fn start_capture(&mut self, point: POINT, settle_ms: u64) {
+        self.start_capture_action(point, settle_ms, CaptureAction::ShowBar);
+    }
+
+    fn start_capture_action(&mut self, point: POINT, settle_ms: u64, action: CaptureAction) {
         self.cancel_pending();
         self.capture_anchor = point;
         let generation = self.generation;
         let hwnd_raw = self.hwnd.0 as isize;
-        let target = winutil::foreground_window();
+        let target = if action == CaptureAction::ShowBar {
+            winutil::foreground_window()
+        } else {
+            self.target
+        };
         let target_raw = target.0 as isize;
-        // 终端类窗口不自动复制：Ctrl+C 在终端里是“复制并取消选区”。
-        let allow_keyboard = !winutil::prefers_deferred_capture(target);
+        // 自动触发不复制终端；显式点击按钮才允许延迟取词。
+        let allow_keyboard = action != CaptureAction::ShowBar || !winutil::prefers_deferred_capture(target);
+        let request = capture::Request::new(target);
         std::thread::spawn(move || {
-            let outcome = capture::capture_selection(
+            let outcome = capture::capture_selection_for(
+                request,
                 Duration::from_millis(settle_ms),
                 Duration::from_millis(CAPTURE_TIMEOUT_MS),
                 allow_keyboard,
@@ -391,7 +411,8 @@ impl App {
             let (text, deferred, bounds) = match outcome {
                 capture::Outcome::Text { text, bounds } => (text, false, bounds),
                 capture::Outcome::Deferred => (String::new(), true, None),
-                capture::Outcome::None => return,
+                capture::Outcome::None if action == CaptureAction::ShowBar => return,
+                capture::Outcome::None => (String::new(), false, None),
             };
             let hwnd = HWND(hwnd_raw as *mut c_void);
             let target = HWND(target_raw as *mut c_void);
@@ -402,6 +423,8 @@ impl App {
                 anchor: point,
                 target,
                 generation,
+                request,
+                action,
             });
             unsafe {
                 let _ = PostMessageW(
@@ -414,28 +437,20 @@ impl App {
         });
     }
 
-    /// 延迟取词：终端类窗口在用户点按钮时才复制，避免“工具条一出现选区就没了”。
-    fn resolve_deferred(&mut self) {
+    /// 延迟取词也必须在后台执行：UI 线程同时驱动低级键盘钩子，
+    /// 同步 UIA/剪贴板等待会阻塞 Ctrl+C 放行和取消通知。
+    fn resolve_deferred(&mut self, action: CaptureAction) -> bool {
         if !self.deferred {
-            return;
+            return false;
         }
-        self.deferred = false;
-        match capture::capture_selection(
-            Duration::ZERO,
-            Duration::from_millis(CAPTURE_TIMEOUT_MS),
-            true,
-            self.capture_anchor,
-        ) {
-            capture::Outcome::Text { text, bounds } => {
-                self.anchor = anchor_from_bounds(self.anchor, bounds);
-                self.text = text;
-            }
-            _ => self.text.clear(),
-        }
+        self.start_capture_action(self.capture_anchor, 0, action);
+        true
     }
 
     fn start_translate(&mut self) {
-        self.resolve_deferred();
+        if self.resolve_deferred(CaptureAction::Translate) {
+            return;
+        }
         if self.text.trim().is_empty() {
             self.hide("translate-empty");
             return;
@@ -466,7 +481,9 @@ impl App {
     }
 
     fn copy_selection(&mut self) {
-        self.resolve_deferred();
+        if self.resolve_deferred(CaptureAction::Copy) {
+            return;
+        }
         if self.text.trim().is_empty() {
             self.hide("copy-empty");
             return;
@@ -811,7 +828,7 @@ impl App {
             }
             hooks::MSG_CAPTURE_DONE => {
                 let payload = Box::from_raw(lparam.0 as *mut CapturePayload);
-                let stale = payload.generation != self.generation;
+                let stale = payload.generation != self.generation || !payload.request.is_current();
                 let fg_ok = payload.target.0.is_null()
                     || winutil::foreground_window() == payload.target
                     || !winutil::is_window(payload.target);
@@ -819,10 +836,14 @@ impl App {
                     return Some(LRESULT(0));
                 }
                 self.text = payload.text;
-                self.deferred = payload.deferred;
+                self.deferred = payload.deferred && payload.action == CaptureAction::ShowBar;
                 self.anchor = anchor_from_bounds(payload.anchor, payload.bounds);
                 self.target = payload.target;
-                self.show_bar();
+                match payload.action {
+                    CaptureAction::ShowBar => self.show_bar(),
+                    CaptureAction::Copy => self.copy_selection(),
+                    CaptureAction::Translate => self.start_translate(),
+                }
                 Some(LRESULT(0))
             }
             hooks::MSG_TRANSLATE_DONE => {

@@ -21,6 +21,8 @@ use whelper_common::win32::hook::{self as keyboard_hook, KeyEvent};
 
 use whelper_config as config;
 
+use crate::capture;
+
 // 自定义消息（钩子 → 主窗口）
 pub const MSG_MOUSE_DOWN: u32 = WM_APP + 1;
 pub const MSG_MOUSE_UP: u32 = WM_APP + 2;
@@ -193,10 +195,13 @@ pub fn install(hwnd: HWND) -> bool {
             Err(_) => false,
         }
     };
-    mouse_ok && keyboard_hook::add_handler(on_key_event)
+    let installed = mouse_ok && keyboard_hook::add_handler(on_key_event);
+    capture::set_keyboard_hook_ready(installed);
+    installed
 }
 
 pub fn uninstall() {
+    capture::set_keyboard_hook_ready(false);
     unsafe {
         let mouse = MOUSE_HOOK.swap(0, Ordering::SeqCst);
         if mouse != 0 {
@@ -291,6 +296,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam);
     }
     let pt = info.pt;
+    if (matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) && !inside_toolbar(pt))
+        || msg == WM_MOUSEWHEEL
+    {
+        capture::cancel_pending();
+    }
     match msg {
         WM_LBUTTONDOWN => {
             if inside_toolbar(pt) {
@@ -341,11 +351,20 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
 /// 键盘钩子的取词判定（钩子安装与事件解码在 `whelper-common`）。
 ///
-/// 与 `show-desktop` 不同，这里**从不吞键**：`Ctrl+A` / `Shift+方向键` 等仍要送给前台应用。
+/// 与 `show-desktop` 不同，这里**从不吞用户按键**：`Ctrl+A` / `Shift+方向键` 等仍要送给前台应用。
+/// 唯一可丢弃的是已取消请求生成的自家整批 Ctrl+C。
 /// 返回 `true` 的语义只有“吞掉该按键”。
 fn on_key_event(event: &KeyEvent) -> bool {
+    if let Some(suppress) = capture::filter_copy_input(event) {
+        return suppress;
+    }
+    if event.is_down {
+        // 必须在放行按键前同步通知后台：PostMessage 只取消 UI 结果太迟。
+        // 修饰键和其它程序注入的复制也算用户输入，不能被旧备份覆盖。
+        capture::cancel_pending();
+    }
     if event.injected {
-        // 注入事件（含我们自己的 Ctrl+C）不参与取词判定。
+        // 其它程序注入的事件可以取消取词，但不触发新取词。
         return false;
     }
     if !config::get().picker.enabled {
@@ -469,6 +488,17 @@ mod tests {
         d.button_down(pt(0, 0), 10);
         d.mouse_move(pt(24, 0));
         assert!(d.button_up().unwrap().should_capture);
+    }
+
+    #[test]
+    fn copy_shortcut_is_never_swallowed() {
+        for vk in [0x11, 0xA2, 0xA3, 0x43] {
+            for is_down in [true, false] {
+                for (injected, extra_info) in [(false, 0), (true, 0), (true, keyboard_hook::INJECTED_FLAG)] {
+                    assert!(!on_key_event(&KeyEvent { vk, is_down, injected, extra_info }));
+                }
+            }
+        }
     }
 
     #[test]

@@ -32,7 +32,18 @@ fn open_with_retry() -> bool {
 
 /// 读取剪贴板文本（`CF_UNICODETEXT`）。
 pub fn get_text() -> Option<String> {
+    get_text_with_sequence(|| true).and_then(|(text, _)| text)
+}
+
+/// 文本与版本必须在同一次 OpenClipboard 内读取；读取延迟渲染格式后再记录版本。
+/// 等待剪贴板锁期间请求可能被取消，拿到锁后必须再次检查。
+/// 外层 None 表示未取得快照；内层 None 表示非文本，仍可按版本还原。
+pub fn get_text_with_sequence(is_current: impl Fn() -> bool) -> Option<(Option<String>, u32)> {
     if !open_with_retry() {
+        return None;
+    }
+    if !is_current() {
+        unsafe { let _ = CloseClipboard(); }
         return None;
     }
     let result = unsafe {
@@ -55,10 +66,11 @@ pub fn get_text() -> Option<String> {
             Err(_) => None,
         }
     };
+    let snapshot = Some((result, sequence_number()));
     unsafe {
         let _ = CloseClipboard();
     }
-    result
+    snapshot
 }
 
 /// 把文本写入剪贴板（`复制` 按钮使用）。
@@ -105,7 +117,7 @@ pub fn sequence_number() -> u32 {
 /// 取词前的剪贴板备份（仅 HGLOBAL 格式）。
 pub struct Backup {
     entries: Vec<(u32, Vec<u8>)>,
-    valid: bool,
+    sequence: Option<u32>,
 }
 
 impl Backup {
@@ -113,8 +125,9 @@ impl Backup {
         let mut entries = Vec::new();
         if !open_with_retry() {
             // 打开失败时不要还原，否则会把用户剪贴板清空。
-            return Self { entries, valid: false };
+            return Self { entries, sequence: None };
         }
+        let sequence;
         unsafe {
             let mut format = EnumClipboardFormats(0);
             while format != 0 {
@@ -134,23 +147,34 @@ impl Backup {
                 }
                 format = EnumClipboardFormats(format);
             }
+            sequence = sequence_number();
             let _ = CloseClipboard();
         }
-        Self { entries, valid: true }
+        Self { entries, sequence: Some(sequence) }
     }
 
-    /// 把备份写回剪贴板；原本为空则清空。
-    pub fn restore(&self) {
-        if !self.valid || !open_with_retry() {
-            return;
+    /// 备份时的版本；失败时为 None，调用方不得继续模拟复制。
+    pub fn sequence(&self) -> Option<u32> {
+        self.sequence
+    }
+
+    /// 仅在剪贴板仍是本次取词读到的版本且请求未取消时还原。
+    /// 校验必须放在 OpenClipboard 之后，避免等锁时用户的新复制被覆盖。
+    pub fn restore_if_unchanged(&self, expected: u32, is_current: impl Fn() -> bool) -> bool {
+        if self.sequence.is_none() || !is_current() || !open_with_retry() {
+            return false;
         }
+        let mut restored = false;
         unsafe {
-            let _ = EmptyClipboard();
-            for (format, bytes) in &self.entries {
-                put_hglobal(*format, bytes);
+            if sequence_number() == expected && is_current() && EmptyClipboard().is_ok() {
+                restored = true;
+                for (format, bytes) in &self.entries {
+                    restored &= put_hglobal(*format, bytes);
+                }
             }
             let _ = CloseClipboard();
         }
+        restored
     }
 }
 
@@ -170,9 +194,49 @@ mod tests {
         let backup = Backup::take();
         assert!(set_text("取词时临时写入的内容"));
         assert_eq!(get_text().as_deref(), Some("取词时临时写入的内容"));
-        backup.restore();
+        let (_, captured_sequence) = get_text_with_sequence(|| true).unwrap();
+        assert!(backup.restore_if_unchanged(captured_sequence, || true));
         assert_eq!(get_text().as_deref(), Some("划词工具条 测试 123"));
 
-        original.restore();
+        // 取词读完后用户又复制了：必须保留新内容，即使文本恰好相同。
+        assert!(set_text("用户复制的内容"));
+        let stale_sequence = sequence_number();
+        assert!(set_text("用户复制的内容"));
+        assert_ne!(sequence_number(), stale_sequence);
+        assert!(!backup.restore_if_unchanged(stale_sequence, || true));
+        assert_eq!(get_text().as_deref(), Some("用户复制的内容"));
+
+        // 用户的 C 已被钩子放行，但源应用还没写剪贴板：版本相同也不能还原。
+        let unchanged = sequence_number();
+        assert!(!backup.restore_if_unchanged(unchanged, || false));
+        assert_eq!(sequence_number(), unchanged);
+
+        // 获取剪贴板锁期间取消：必须在锁内重查，不能只在 OpenClipboard 前查。
+        let checks = std::cell::Cell::new(0);
+        assert!(!backup.restore_if_unchanged(unchanged, || {
+            checks.set(checks.get() + 1);
+            checks.get() == 1
+        }));
+        assert_eq!(checks.get(), 2);
+        assert_eq!(sequence_number(), unchanged);
+        assert!(get_text_with_sequence(|| false).is_none());
+
+        // 备份失败时不能清空剪贴板。
+        let invalid = Backup { entries: Vec::new(), sequence: None };
+        assert!(!invalid.restore_if_unchanged(unchanged, || true));
+        assert_eq!(sequence_number(), unchanged);
+
+        // 没有文本的快照也要带版本，才能还原图形应用复制后留下的临时内容。
+        assert!(open_with_retry());
+        unsafe {
+            assert!(EmptyClipboard().is_ok());
+            let _ = CloseClipboard();
+        }
+        let (text, sequence) = get_text_with_sequence(|| true).unwrap();
+        assert!(text.is_none());
+        assert!(backup.restore_if_unchanged(sequence, || true));
+        assert_eq!(get_text().as_deref(), Some("划词工具条 测试 123"));
+
+        original.restore_if_unchanged(sequence_number(), || true);
     }
 }

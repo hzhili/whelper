@@ -25,12 +25,11 @@ pub use translate::translate_blocking;
 /// 终端里用它可以在不动选区的前提下核对取词内容。
 pub fn probe_capture() -> i32 {
     let before = clipboard::sequence_number();
-    // 与常驻路径同一套决策：终端类窗口不自动复制。
-    let allow_keyboard = !winutil::prefers_deferred_capture(winutil::foreground_window());
+    // 诊断模式没有常驻钩子/消息泵，只走只读 UIA，不发送无法取消的按键。
     let outcome = capture::capture_selection(
         std::time::Duration::ZERO,
         std::time::Duration::from_millis(600),
-        allow_keyboard,
+        false,
         winutil::cursor_position(),
     );
     let changed = clipboard::sequence_number() != before;
