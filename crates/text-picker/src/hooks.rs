@@ -10,14 +10,14 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 use std::sync::Mutex;
 
+use whelper_common::win32::hook::{self as keyboard_hook, KeyEvent};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetDoubleClickTime};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetSystemMetrics, MSLLHOOKSTRUCT, PostMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, HHOOK, SM_CXDOUBLECLK, SM_CYDOUBLECLK, WH_MOUSE_LL, WM_APP,
+    CallNextHookEx, GetSystemMetrics, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
+    MSLLHOOKSTRUCT, SM_CXDOUBLECLK, SM_CYDOUBLECLK, WH_MOUSE_LL, WM_APP,
 };
-use whelper_common::win32::hook::{self as keyboard_hook, KeyEvent};
 
 use whelper_config as config;
 
@@ -281,6 +281,10 @@ fn now_ms() -> u32 {
     unsafe { GetTickCount64() as u32 }
 }
 
+pub fn wheel_delta(mouse_data: u32) -> i32 {
+    ((mouse_data >> 16) as u16 as i16) as i32
+}
+
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code < 0 {
         return CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam);
@@ -297,7 +301,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
     let pt = info.pt;
     if (matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) && !inside_toolbar(pt))
-        || msg == WM_MOUSEWHEEL
+        || (msg == WM_MOUSEWHEEL && !inside_toolbar(pt))
     {
         capture::cancel_pending();
     }
@@ -342,7 +346,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
         }
         WM_MOUSEWHEEL => {
-            post(MSG_WHEEL, 0, pack_point(pt).0);
+            // `mouseData` 的高 16 位是有符号滚轮增量（通常为 ±120）。
+            let delta = wheel_delta(info.mouseData);
+            post(MSG_WHEEL, delta as usize, pack_point(pt).0);
         }
         _ => {}
     }
@@ -494,8 +500,15 @@ mod tests {
     fn copy_shortcut_is_never_swallowed() {
         for vk in [0x11, 0xA2, 0xA3, 0x43] {
             for is_down in [true, false] {
-                for (injected, extra_info) in [(false, 0), (true, 0), (true, keyboard_hook::INJECTED_FLAG)] {
-                    assert!(!on_key_event(&KeyEvent { vk, is_down, injected, extra_info }));
+                for (injected, extra_info) in
+                    [(false, 0), (true, 0), (true, keyboard_hook::INJECTED_FLAG)]
+                {
+                    assert!(!on_key_event(&KeyEvent {
+                        vk,
+                        is_down,
+                        injected,
+                        extra_info
+                    }));
                 }
             }
         }
@@ -507,5 +520,11 @@ mod tests {
         assert_eq!(unpack_point(pack_point(p)), p);
         let p = pt(3000, 1500);
         assert_eq!(unpack_point(pack_point(p)), p);
+    }
+
+    #[test]
+    fn wheel_delta_decodes_signed_high_word() {
+        assert_eq!(wheel_delta(120 << 16), 120);
+        assert_eq!(wheel_delta((-120i32 as u32) << 16), -120);
     }
 }

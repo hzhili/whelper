@@ -13,16 +13,18 @@ use whelper_config::{self as config, Theme};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateRoundRectRgn,
-    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetStockObject,
-    GetTextExtentPoint32W, InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor,
-    SetWindowRgn, TextOutW, UpdateWindow, CLEARTYPE_QUALITY, DEFAULT_CHARSET, HBRUSH, HDC, HFONT,
-    HGDIOBJ, NULL_PEN, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC,
+    GetStockObject, GetTextExtentPoint32W, IntersectClipRect, InvalidateRect, ReleaseDC, RestoreDC,
+    RoundRect, SaveDC, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, UpdateWindow,
+    CLEARTYPE_QUALITY, DEFAULT_CHARSET, HBRUSH, HDC, HFONT, HGDIOBJ, NULL_PEN, PAINTSTRUCT,
+    SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -30,11 +32,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, CREATESTRUCTW,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HMENU, HWND_TOPMOST, IDC_ARROW,
-    MF_SEPARATOR, MF_STRING, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNORMAL,
-    SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCCREATE, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    MF_SEPARATOR, MF_STRING, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NCCREATE, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::capture;
@@ -54,6 +56,11 @@ const MENU_QUIT: usize = 2;
 /// 刚弹出时忽略失焦的宽限期（避免弹出瞬间因焦点切换而立刻消失）。
 const SHOW_GRACE_MS: u64 = 400;
 const CAPTURE_TIMEOUT_MS: u64 = 350;
+const WHEEL_DELTA: i32 = 120;
+
+struct ScrollDrag {
+    grab_offset: i32,
+}
 
 const fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
     COLORREF(r | (g << 8) | (b << 16))
@@ -185,6 +192,14 @@ pub struct App {
     rect: RECT,
     translation: String,
     error: String,
+    panel_lines: Vec<String>,
+    panel_content_height: i32,
+    panel_viewport_height: i32,
+    panel_scroll_y: i32,
+    wheel_remainder: i32,
+    panel_size: (i32, i32),
+    panel_has_scrollbar: bool,
+    scroll_drag: Option<ScrollDrag>,
     generation: u64,
     timer_on: bool,
     quitting: bool,
@@ -213,6 +228,14 @@ impl App {
             rect: RECT::default(),
             translation: String::new(),
             error: String::new(),
+            panel_lines: Vec::new(),
+            panel_content_height: 0,
+            panel_viewport_height: 0,
+            panel_scroll_y: 0,
+            wheel_remainder: 0,
+            panel_size: (0, 0),
+            panel_has_scrollbar: false,
+            scroll_drag: None,
             generation: 0,
             timer_on: false,
             quitting: false,
@@ -290,6 +313,7 @@ impl App {
         self.cancel_pending();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
+            let _ = ReleaseCapture();
         }
         hooks::set_toolbar_rect(None);
         self.visible = false;
@@ -298,6 +322,14 @@ impl App {
         self.hover = None;
         self.translation.clear();
         self.error.clear();
+        self.panel_lines.clear();
+        self.panel_content_height = 0;
+        self.panel_viewport_height = 0;
+        self.panel_scroll_y = 0;
+        self.wheel_remainder = 0;
+        self.panel_size = (0, 0);
+        self.panel_has_scrollbar = false;
+        self.scroll_drag = None;
     }
 
     unsafe fn apply_region(&self) {
@@ -363,10 +395,129 @@ impl App {
         let _ = UpdateWindow(self.hwnd);
     }
 
-    unsafe fn switch_to_panel(&mut self) {
+    fn panel_body(&self) -> &str {
+        match self.mode {
+            Mode::Loading => "正在翻译…",
+            Mode::Result => &self.translation,
+            Mode::Error => &self.error,
+            Mode::Bar => "",
+        }
+    }
+
+    /// 根据当前正文重新计算面板宽高、换行结果和滚动范围。
+    unsafe fn reflow_panel(&mut self) {
         self.ensure_fonts();
+        let body = self.panel_body().to_string();
         let work = winutil::work_area(self.anchor);
-        let rect = toolbar::panel_rect(self.anchor, self.scale, work);
+        let pad = toolbar::scale(toolbar::PANEL_PAD, self.scale);
+        let min_size = toolbar::panel_size(self.scale);
+        let screen_w = (work.right - work.left - toolbar::SCREEN_MARGIN * 2).max(1);
+        let screen_h = (work.bottom - work.top - toolbar::SCREEN_MARGIN * 2).max(1);
+        let max_w = toolbar::scale(toolbar::PANEL_MAX_W, self.scale)
+            .min(screen_w)
+            .max(1);
+        let max_h = toolbar::scale(toolbar::PANEL_MAX_H, self.scale)
+            .min(screen_h)
+            .max(1);
+        let min_w = min_size.0.min(max_w);
+        let min_h = min_size.1.min(max_h);
+
+        let dc = GetDC(self.hwnd);
+        if dc.0.is_null() {
+            return;
+        }
+        let natural_width = body
+            .split('\n')
+            .map(|line| measure(dc, self.font, line))
+            .max()
+            .unwrap_or(0);
+        let mut width = (natural_width + pad * 2).max(min_w).min(max_w);
+        let mut has_scrollbar = false;
+        let mut lines = Vec::new();
+        let mut content_height = 0;
+        for _ in 0..2 {
+            let body_width = (width
+                - pad * 2
+                - if has_scrollbar {
+                    toolbar::scale(
+                        toolbar::PANEL_SCROLLBAR_W + toolbar::PANEL_SCROLLBAR_GAP,
+                        self.scale,
+                    )
+                } else {
+                    0
+                })
+            .max(1);
+            lines = wrap_text(dc, self.font, &body, body_width, usize::MAX);
+            if lines.is_empty() {
+                lines.push(String::new());
+            }
+            content_height = toolbar::scale(toolbar::PANEL_LINE_H, self.scale)
+                * lines.len().min(i32::MAX as usize) as i32;
+            let needed_height = pad
+                + toolbar::scale(toolbar::PANEL_TITLE_H, self.scale)
+                + content_height
+                + toolbar::scale(
+                    toolbar::PANEL_DIVIDER_GAP + toolbar::PANEL_FOOTER_H,
+                    self.scale,
+                );
+            let next_scrollbar = needed_height > max_h;
+            if next_scrollbar == has_scrollbar {
+                break;
+            }
+            has_scrollbar = next_scrollbar;
+        }
+        let _ = ReleaseDC(self.hwnd, dc);
+
+        // `height` may have been calculated before the second wrapping pass; keep
+        // it consistent with the final line count.
+        let needed_height = pad
+            + toolbar::scale(toolbar::PANEL_TITLE_H, self.scale)
+            + content_height
+            + toolbar::scale(
+                toolbar::PANEL_DIVIDER_GAP + toolbar::PANEL_FOOTER_H,
+                self.scale,
+            );
+        let mut height = needed_height.max(min_h).min(max_h);
+        let size = toolbar::panel_size_for_content(width, height, self.scale);
+        width = size.0.min(max_w).max(1);
+        height = size.1.min(max_h).max(1);
+        self.panel_lines = lines;
+        self.panel_content_height = content_height;
+        self.panel_size = (width, height);
+        self.panel_has_scrollbar = has_scrollbar;
+        let client = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let body_rect = toolbar::panel_body_rect(client, self.scale, has_scrollbar);
+        self.panel_viewport_height = (body_rect.bottom - body_rect.top).max(1);
+        self.panel_scroll_y = self.max_scroll().min(self.panel_scroll_y.max(0));
+    }
+
+    fn max_scroll(&self) -> i32 {
+        (self.panel_content_height - self.panel_viewport_height).max(0)
+    }
+
+    fn scroll_to(&mut self, offset: i32) {
+        let next = offset.clamp(0, self.max_scroll());
+        if next != self.panel_scroll_y {
+            self.panel_scroll_y = next;
+            unsafe {
+                let _ = InvalidateRect(self.hwnd, None, true);
+            }
+        }
+    }
+
+    fn scroll_by(&mut self, delta: i32) {
+        self.scroll_to(self.panel_scroll_y.saturating_add(delta));
+    }
+
+    unsafe fn switch_to_panel(&mut self) {
+        self.reflow_panel();
+        let work = winutil::work_area(self.anchor);
+        let rect = toolbar::panel_rect_for_size(self.anchor, self.panel_size, work);
         self.place_window(rect);
         let _ = UpdateWindow(self.hwnd);
     }
@@ -398,7 +549,8 @@ impl App {
         };
         let target_raw = target.0 as isize;
         // 自动触发不复制终端；显式点击按钮才允许延迟取词。
-        let allow_keyboard = action != CaptureAction::ShowBar || !winutil::prefers_deferred_capture(target);
+        let allow_keyboard =
+            action != CaptureAction::ShowBar || !winutil::prefers_deferred_capture(target);
         let request = capture::Request::new(target);
         std::thread::spawn(move || {
             let outcome = capture::capture_selection_for(
@@ -459,6 +611,8 @@ impl App {
         self.hover = None;
         self.error.clear();
         self.translation.clear();
+        self.panel_scroll_y = 0;
+        self.wheel_remainder = 0;
         unsafe {
             self.switch_to_panel();
         }
@@ -540,8 +694,20 @@ impl App {
             },
             Mode::Loading => {}
             Mode::Result | Mode::Error => {
-                if toolbar::point_in(toolbar::panel_click_rect(self.rect), pt) {
+                let was_dragging = self.scroll_drag.take().is_some();
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                if was_dragging {
+                    return;
+                }
+                if toolbar::point_in(self.panel_footer_rect(), pt) {
                     self.open_translation_in_browser();
+                } else if toolbar::point_in(
+                    toolbar::panel_scrollbar_rect(self.rect, self.scale),
+                    pt,
+                ) {
+                    self.scroll_to(self.scroll_from_thumb_y(pt.y));
                 } else {
                     self.hide("panel-click-elsewhere");
                 }
@@ -549,13 +715,59 @@ impl App {
         }
     }
 
-    fn on_mouse_move(&mut self) {
-        if self.mode != Mode::Bar {
-            return;
+    fn panel_footer_rect(&self) -> RECT {
+        let footer_y = self.rect.bottom - toolbar::scale(toolbar::PANEL_FOOTER_H, self.scale);
+        RECT {
+            left: self.rect.left,
+            top: footer_y,
+            right: self.rect.right,
+            bottom: self.rect.bottom,
         }
+    }
+
+    fn scroll_from_thumb_y(&self, y: i32) -> i32 {
+        let track = toolbar::panel_scrollbar_track_rect(self.rect, self.scale);
+        let thumb = toolbar::panel_scrollbar_thumb_rect(
+            self.rect,
+            self.scale,
+            self.panel_content_height,
+            self.panel_viewport_height,
+            self.panel_scroll_y,
+        );
+        let travel = (track.bottom - track.top - (thumb.bottom - thumb.top)).max(1);
+        let position = (y - track.top - (thumb.bottom - thumb.top) / 2).clamp(0, travel);
+        let max_scroll = self.max_scroll();
+        if max_scroll == 0 {
+            0
+        } else {
+            (position as i64 * max_scroll as i64 / travel as i64) as i32
+        }
+    }
+
+    fn on_mouse_move(&mut self) {
         let mut pt = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut pt);
+        }
+        if let Some(drag) = self.scroll_drag.as_ref() {
+            let track = toolbar::panel_scrollbar_track_rect(self.rect, self.scale);
+            let thumb = toolbar::panel_scrollbar_thumb_rect(
+                self.rect,
+                self.scale,
+                self.panel_content_height,
+                self.panel_viewport_height,
+                self.panel_scroll_y,
+            );
+            let travel = (track.bottom - track.top - (thumb.bottom - thumb.top)).max(1);
+            let position = (pt.y - track.top - drag.grab_offset).clamp(0, travel);
+            let max_scroll = self.max_scroll();
+            if max_scroll > 0 {
+                self.scroll_to((position as i64 * max_scroll as i64 / travel as i64) as i32);
+            }
+            return;
+        }
+        if self.mode != Mode::Bar {
+            return;
         }
         let hover = self.button_at(pt);
         if hover != self.hover {
@@ -563,6 +775,53 @@ impl App {
             unsafe {
                 let _ = InvalidateRect(self.hwnd, None, true);
             }
+        }
+    }
+
+    fn on_mouse_down(&mut self) {
+        if !matches!(self.mode, Mode::Result | Mode::Error) {
+            return;
+        }
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let thumb = toolbar::panel_scrollbar_thumb_rect(
+            self.rect,
+            self.scale,
+            self.panel_content_height,
+            self.panel_viewport_height,
+            self.panel_scroll_y,
+        );
+        if toolbar::point_in(thumb, pt) {
+            self.scroll_drag = Some(ScrollDrag {
+                grab_offset: pt.y - thumb.top,
+            });
+            unsafe {
+                let _ = SetCapture(self.hwnd);
+            }
+        } else if toolbar::point_in(toolbar::panel_scrollbar_rect(self.rect, self.scale), pt) {
+            self.scroll_to(self.scroll_from_thumb_y(pt.y));
+        }
+    }
+
+    fn on_wheel(&mut self, delta: i32, pt: POINT) {
+        if !self.visible {
+            return;
+        }
+        if !matches!(self.mode, Mode::Result | Mode::Error) || !toolbar::point_in(self.rect, pt) {
+            self.hide("wheel");
+            return;
+        }
+        if self.max_scroll() == 0 {
+            self.hide("wheel-no-scroll");
+            return;
+        }
+        self.wheel_remainder = self.wheel_remainder.saturating_add(delta);
+        let notches = self.wheel_remainder / WHEEL_DELTA;
+        self.wheel_remainder %= WHEEL_DELTA;
+        if notches != 0 {
+            self.scroll_by(-notches * toolbar::scale(toolbar::PANEL_LINE_H * 3, self.scale));
         }
     }
 
@@ -587,7 +846,12 @@ impl App {
         // 卡片 = 1px 描边 + 内层填充（窗口区域已经把外圈裁成 10px 圆角）。
         fill_rect(mem, rc, self.pal.border);
         let bw = toolbar::scale(toolbar::BORDER, self.scale);
-        let inner = RECT { left: bw, top: bw, right: w - bw, bottom: h - bw };
+        let inner = RECT {
+            left: bw,
+            top: bw,
+            right: w - bw,
+            bottom: h - bw,
+        };
         let inner_radius = (toolbar::scale(toolbar::BAR_RADIUS, self.scale) - bw).max(2);
         round_fill(mem, inner, inner_radius, self.pal.card);
         let _ = SetBkMode(mem, TRANSPARENT);
@@ -597,17 +861,13 @@ impl App {
             Mode::Bar => self.paint_bar(mem),
             Mode::Loading => {
                 let muted = self.pal.muted;
-                self.paint_panel(mem, rc, "翻译", "正在翻译…", muted);
+                self.paint_panel(mem, rc, "翻译", muted);
             }
             Mode::Result => {
-                let text = self.translation.clone();
-                let color = self.pal.text;
-                self.paint_panel(mem, rc, "翻译", &text, color);
+                self.paint_panel(mem, rc, "翻译", self.pal.text);
             }
             Mode::Error => {
-                let text = self.error.clone();
-                let color = self.pal.error;
-                self.paint_panel(mem, rc, "翻译失败", &text, color);
+                self.paint_panel(mem, rc, "翻译失败", self.pal.error);
             }
         }
 
@@ -653,27 +913,56 @@ impl App {
         }
     }
 
-    unsafe fn paint_panel(&self, hdc: HDC, rc: RECT, title: &str, body: &str, body_color: COLORREF) {
-        let pad = toolbar::scale(14, self.scale);
+    unsafe fn paint_panel(&self, hdc: HDC, rc: RECT, title: &str, body_color: COLORREF) {
+        let pad = toolbar::scale(toolbar::PANEL_PAD, self.scale);
         let title_y = pad;
         draw_left(hdc, self.font_small, title, pad, title_y, self.pal.muted);
 
-        let body_top = title_y + toolbar::scale(22, self.scale);
-        let max_width = rc.right - pad * 2;
-        let lines = wrap_text(hdc, self.font, body, max_width, 3);
-        let mut y = body_top;
-        for line in &lines {
-            draw_left(hdc, self.font, line, pad, y, body_color);
-            y += toolbar::scale(21, self.scale);
+        let body_rect = toolbar::panel_body_rect(rc, self.scale, self.panel_has_scrollbar);
+        let saved = SaveDC(hdc);
+        let _ = IntersectClipRect(
+            hdc,
+            body_rect.left,
+            body_rect.top,
+            body_rect.right,
+            body_rect.bottom,
+        );
+        let line_h = toolbar::scale(toolbar::PANEL_LINE_H, self.scale);
+        let mut y = body_rect.top - self.panel_scroll_y;
+        for line in &self.panel_lines {
+            draw_left(hdc, self.font, line, body_rect.left, y, body_color);
+            y += line_h;
+        }
+        if saved != 0 {
+            let _ = RestoreDC(hdc, saved);
+        }
+
+        if self.panel_has_scrollbar {
+            let track = toolbar::panel_scrollbar_track_rect(rc, self.scale);
+            let thumb = toolbar::panel_scrollbar_thumb_rect(
+                rc,
+                self.scale,
+                self.panel_content_height,
+                self.panel_viewport_height,
+                self.panel_scroll_y,
+            );
+            fill_rect(hdc, track, self.pal.divider);
+            round_fill(
+                hdc,
+                thumb,
+                toolbar::scale(toolbar::PANEL_SCROLLBAR_W / 2, self.scale).max(1),
+                self.pal.muted,
+            );
         }
 
         // 底部提示与分隔线（1px divider）。
-        let footer_y = rc.bottom - toolbar::scale(26, self.scale);
+        let footer_y = rc.bottom - toolbar::scale(toolbar::PANEL_FOOTER_H, self.scale);
         let divider = RECT {
             left: pad,
-            top: footer_y - toolbar::scale(8, self.scale),
+            top: footer_y - toolbar::scale(toolbar::PANEL_DIVIDER_GAP, self.scale),
             right: rc.right - pad,
-            bottom: footer_y - toolbar::scale(8, self.scale) + toolbar::scale(1, self.scale).max(1),
+            bottom: footer_y - toolbar::scale(toolbar::PANEL_DIVIDER_GAP, self.scale)
+                + toolbar::scale(1, self.scale).max(1),
         };
         fill_rect(hdc, divider, self.pal.divider);
         draw_left(
@@ -776,6 +1065,10 @@ impl App {
                 self.on_mouse_move();
                 Some(LRESULT(0))
             }
+            WM_LBUTTONDOWN => {
+                self.on_mouse_down();
+                Some(LRESULT(0))
+            }
             WM_LBUTTONUP => {
                 self.on_mouse_up();
                 Some(LRESULT(0))
@@ -799,9 +1092,8 @@ impl App {
                 Some(LRESULT(0))
             }
             hooks::MSG_WHEEL => {
-                if self.visible {
-                    self.hide("wheel");
-                }
+                let point = hooks::unpack_point(lparam);
+                self.on_wheel(wparam.0 as i32, point);
                 Some(LRESULT(0))
             }
             hooks::MSG_KEY_DOWN => {
@@ -861,6 +1153,8 @@ impl App {
                         self.mode = Mode::Error;
                     }
                 }
+                self.panel_scroll_y = 0;
+                self.wheel_remainder = 0;
                 self.switch_to_panel();
                 Some(LRESULT(0))
             }
@@ -877,13 +1171,13 @@ impl App {
             WM_DPICHANGED => {
                 self.rebuild_fonts();
                 if self.visible {
-                    let work = winutil::work_area(self.anchor);
-                    let rect = if self.mode == Mode::Bar {
-                        toolbar::bar_rect(self.anchor, self.scale, work)
+                    if self.mode == Mode::Bar {
+                        let work = winutil::work_area(self.anchor);
+                        let rect = toolbar::bar_rect(self.anchor, self.scale, work);
+                        self.place_window(rect);
                     } else {
-                        toolbar::panel_rect(self.anchor, self.scale, work)
-                    };
-                    self.place_window(rect);
+                        self.switch_to_panel();
+                    }
                 }
                 Some(LRESULT(0))
             }
@@ -1007,7 +1301,15 @@ fn round_fill(hdc: HDC, rect: RECT, radius: i32, color: COLORREF) {
         let brush = CreateSolidBrush(color);
         let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
         let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-        let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            radius,
+            radius,
+        );
         SelectObject(hdc, old_pen);
         SelectObject(hdc, old_brush);
         let _ = DeleteObject(HGDIOBJ(brush.0));
@@ -1020,7 +1322,11 @@ unsafe fn measure(hdc: HDC, font: HFONT, text: &str) -> i32 {
     let mut size = windows::Win32::Foundation::SIZE::default();
     let ok = GetTextExtentPoint32W(hdc, &wide, &mut size).as_bool();
     SelectObject(hdc, old);
-    if ok { size.cx } else { 0 }
+    if ok {
+        size.cx
+    } else {
+        0
+    }
 }
 
 fn draw_left(hdc: HDC, font: HFONT, text: &str, x: i32, y: i32, color: COLORREF) {

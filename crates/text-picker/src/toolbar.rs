@@ -33,9 +33,22 @@ pub const ANCHOR_GAP: i32 = 8;
 /// 与屏幕边缘的最小留白。
 pub const SCREEN_MARGIN: i32 = 4;
 
-/// 翻译结果面板尺寸（逻辑像素）。
+/// 翻译结果面板的最小尺寸（逻辑像素）。
 pub const PANEL_W: i32 = 360;
 pub const PANEL_H: i32 = 120;
+/// 翻译结果面板的最大尺寸（逻辑像素）。超过高度后使用滚动条。
+pub const PANEL_MAX_W: i32 = 560;
+pub const PANEL_MAX_H: i32 = 420;
+/// 面板内容布局尺寸（逻辑像素）。
+pub const PANEL_PAD: i32 = 14;
+pub const PANEL_TITLE_H: i32 = 22;
+pub const PANEL_LINE_H: i32 = 21;
+pub const PANEL_FOOTER_H: i32 = 26;
+pub const PANEL_DIVIDER_GAP: i32 = 8;
+/// 自绘滚动条的轨道宽度、可点击区域宽度，以及正文预留间距。
+pub const PANEL_SCROLLBAR_W: i32 = 6;
+pub const PANEL_SCROLLBAR_HIT_W: i32 = 16;
+pub const PANEL_SCROLLBAR_GAP: i32 = 6;
 
 pub fn scale(v: i32, s: f32) -> i32 {
     (v as f32 * s).round().max(1.0) as i32
@@ -49,6 +62,93 @@ pub fn bar_size(s: f32) -> (i32, i32) {
 
 pub fn panel_size(s: f32) -> (i32, i32) {
     (scale(PANEL_W, s), scale(PANEL_H, s))
+}
+
+/// 按内容计算出的面板尺寸，统一夹在最小/最大尺寸之间。
+/// `width`/`height` 已经是当前 DPI 下的像素值。
+pub fn panel_size_for_content(width: i32, height: i32, s: f32) -> (i32, i32) {
+    let (min_w, min_h) = panel_size(s);
+    let max_w = scale(PANEL_MAX_W, s);
+    let max_h = scale(PANEL_MAX_H, s);
+    (width.max(min_w).min(max_w), height.max(min_h).min(max_h))
+}
+
+/// 面板正文区域。`scrollbar` 为 true 时给自绘滚动条预留宽度。
+pub fn panel_body_rect(panel: RECT, s: f32, scrollbar: bool) -> RECT {
+    let pad = scale(PANEL_PAD, s);
+    let top = panel.top + pad + scale(PANEL_TITLE_H, s);
+    let footer_y = panel.bottom - scale(PANEL_FOOTER_H, s);
+    let bottom = footer_y - scale(PANEL_DIVIDER_GAP, s);
+    let reserved = if scrollbar {
+        scale(PANEL_SCROLLBAR_W + PANEL_SCROLLBAR_GAP, s)
+    } else {
+        0
+    };
+    RECT {
+        left: panel.left + pad,
+        top,
+        right: (panel.right - pad - reserved).max(panel.left + pad + 1),
+        bottom: bottom.max(top + 1),
+    }
+}
+
+/// 面板滚动条的可点击区域（比视觉轨道略宽，便于鼠标操作）。
+pub fn panel_scrollbar_rect(panel: RECT, s: f32) -> RECT {
+    let pad = scale(PANEL_PAD, s);
+    let width = scale(PANEL_SCROLLBAR_HIT_W, s);
+    let top = panel.top + pad + scale(PANEL_TITLE_H, s);
+    let bottom = panel.bottom - scale(PANEL_FOOTER_H + PANEL_DIVIDER_GAP, s);
+    let right = panel.right - pad;
+    RECT {
+        left: (right - width).max(panel.left),
+        top,
+        right,
+        bottom: bottom.max(top + 1),
+    }
+}
+
+/// 面板滚动条的视觉轨道。
+pub fn panel_scrollbar_track_rect(panel: RECT, s: f32) -> RECT {
+    let hit = panel_scrollbar_rect(panel, s);
+    let width = scale(PANEL_SCROLLBAR_W, s).min(hit.right - hit.left).max(1);
+    let left = hit.left + (hit.right - hit.left - width) / 2;
+    RECT {
+        left,
+        top: hit.top,
+        right: left + width,
+        bottom: hit.bottom,
+    }
+}
+
+/// 根据正文总高度、可视高度和当前偏移量计算滚动条滑块。
+pub fn panel_scrollbar_thumb_rect(
+    panel: RECT,
+    s: f32,
+    content_height: i32,
+    viewport_height: i32,
+    offset: i32,
+) -> RECT {
+    let track = panel_scrollbar_track_rect(panel, s);
+    let track_height = (track.bottom - track.top).max(1);
+    let content_height = content_height.max(1);
+    let viewport_height = viewport_height.max(1).min(content_height);
+    let min_thumb = scale(20, s).min(track_height);
+    let thumb_height =
+        ((track_height as i64 * viewport_height as i64) / content_height as i64) as i32;
+    let thumb_height = thumb_height.max(min_thumb).min(track_height);
+    let max_offset = (content_height - viewport_height).max(0);
+    let travel = track_height - thumb_height;
+    let top_offset = if max_offset == 0 {
+        0
+    } else {
+        (travel as i64 * offset.clamp(0, max_offset) as i64 / max_offset as i64) as i32
+    };
+    RECT {
+        left: track.left,
+        top: track.top + top_offset,
+        right: track.right,
+        bottom: track.top + top_offset + thumb_height,
+    }
 }
 
 fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
@@ -65,11 +165,28 @@ pub fn place(anchor: POINT, w: i32, h: i32, work: RECT, below_only: bool) -> REC
     let above_top = anchor.y - ANCHOR_GAP - h;
     let below_top = anchor.y + ANCHOR_GAP + 10;
     let fits_above = above_top >= work.top + SCREEN_MARGIN;
-    let top = if below_only || !fits_above { below_top } else { above_top };
+    let top = if below_only || !fits_above {
+        below_top
+    } else {
+        above_top
+    };
     let left = anchor.x - w / 2;
-    let left = clamp(left, work.left + SCREEN_MARGIN, work.right - w - SCREEN_MARGIN);
-    let top = clamp(top, work.top + SCREEN_MARGIN, work.bottom - h - SCREEN_MARGIN);
-    RECT { left, top, right: left + w, bottom: top + h }
+    let left = clamp(
+        left,
+        work.left + SCREEN_MARGIN,
+        work.right - w - SCREEN_MARGIN,
+    );
+    let top = clamp(
+        top,
+        work.top + SCREEN_MARGIN,
+        work.bottom - h - SCREEN_MARGIN,
+    );
+    RECT {
+        left,
+        top,
+        right: left + w,
+        bottom: top + h,
+    }
 }
 
 pub fn bar_rect(anchor: POINT, s: f32, work: RECT) -> RECT {
@@ -77,8 +194,11 @@ pub fn bar_rect(anchor: POINT, s: f32, work: RECT) -> RECT {
     place(anchor, w, h, work, false)
 }
 
-pub fn panel_rect(anchor: POINT, s: f32, work: RECT) -> RECT {
-    let (w, h) = panel_size(s);
+pub fn panel_rect_for_size(anchor: POINT, size: (i32, i32), work: RECT) -> RECT {
+    let max_w = (work.right - work.left - SCREEN_MARGIN * 2).max(1);
+    let max_h = (work.bottom - work.top - SCREEN_MARGIN * 2).max(1);
+    let w = size.0.max(1).min(max_w);
+    let h = size.1.max(1).min(max_h);
     place(anchor, w, h, work, false)
 }
 
@@ -92,9 +212,19 @@ pub fn button_rects(bar: RECT, s: f32) -> [RECT; 2] {
     // “求和后缩放” 的 1px 差异把第二个按钮推出卡片。
     let avail = (bar.right - bar.left - pad * 2 - gap).max(2);
     let bw = avail / 2;
-    let first = RECT { left: bar.left + pad, top, right: bar.left + pad + bw, bottom: top + bh };
+    let first = RECT {
+        left: bar.left + pad,
+        top,
+        right: bar.left + pad + bw,
+        bottom: top + bh,
+    };
     let second_left = first.right + gap;
-    let second = RECT { left: second_left, top, right: second_left + bw, bottom: top + bh };
+    let second = RECT {
+        left: second_left,
+        top,
+        right: second_left + bw,
+        bottom: top + bh,
+    };
     [first, second]
 }
 
@@ -103,23 +233,18 @@ pub fn icon_rect(button: RECT, s: f32) -> RECT {
     let pad = scale(BTN_PAD_X, s);
     let size = scale(ICON, s);
     let top = button.top + (button.bottom - button.top - size) / 2;
-    RECT { left: button.left + pad, top, right: button.left + pad + size, bottom: top + size }
+    RECT {
+        left: button.left + pad,
+        top,
+        right: button.left + pad + size,
+        bottom: top + size,
+    }
 }
 
 /// 按钮内文字的起始位置（左对齐、垂直居中）。
 pub fn label_origin(button: RECT, s: f32) -> (i32, i32) {
     let icon = icon_rect(button, s);
     (icon.right + scale(ICON_GAP, s), button.top)
-}
-
-/// 结果面板上「点击打开浏览器」的区域（面板下半部分）。
-pub fn panel_click_rect(panel: RECT) -> RECT {
-    RECT {
-        left: panel.left,
-        top: panel.top + (panel.bottom - panel.top) * 2 / 3,
-        right: panel.right,
-        bottom: panel.bottom,
-    }
 }
 
 pub fn point_in(rect: RECT, pt: POINT) -> bool {
@@ -143,7 +268,12 @@ pub enum Mode {
 mod tests {
     use super::*;
 
-    const WORK: RECT = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+    const WORK: RECT = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1040,
+    };
 
     #[test]
     fn toolbar_sits_above_the_anchor_when_there_is_room() {
@@ -173,7 +303,12 @@ mod tests {
 
     #[test]
     fn toolbar_is_clamped_to_a_secondary_monitor_offset() {
-        let work = RECT { left: 1920, top: -200, right: 3840, bottom: 880 };
+        let work = RECT {
+            left: 1920,
+            top: -200,
+            right: 3840,
+            bottom: 880,
+        };
         let r = bar_rect(POINT { x: 1930, y: 0 }, 1.0, work);
         assert!(r.left >= work.left + SCREEN_MARGIN);
         assert!(r.right <= work.right - SCREEN_MARGIN);
@@ -183,9 +318,27 @@ mod tests {
     fn buttons_are_hit_testable() {
         let bar = bar_rect(POINT { x: 800, y: 600 }, 1.0, WORK);
         let [copy, translate] = button_rects(bar, 1.0);
-        assert!(point_in(copy, POINT { x: copy.left + 2, y: copy.top + 2 }));
-        assert!(!point_in(copy, POINT { x: translate.left + 2, y: translate.top + 2 }));
-        assert!(point_in(translate, POINT { x: translate.right - 1, y: translate.bottom - 1 }));
+        assert!(point_in(
+            copy,
+            POINT {
+                x: copy.left + 2,
+                y: copy.top + 2
+            }
+        ));
+        assert!(!point_in(
+            copy,
+            POINT {
+                x: translate.left + 2,
+                y: translate.top + 2
+            }
+        ));
+        assert!(point_in(
+            translate,
+            POINT {
+                x: translate.right - 1,
+                y: translate.bottom - 1
+            }
+        ));
     }
 
     #[test]
@@ -204,11 +357,40 @@ mod tests {
     }
 
     #[test]
+    fn panel_content_size_is_clamped_to_limits() {
+        assert_eq!(panel_size_for_content(100, 80, 1.0), panel_size(1.0));
+        assert_eq!(
+            panel_size_for_content(PANEL_MAX_W + 100, PANEL_MAX_H + 100, 1.0),
+            (PANEL_MAX_W, PANEL_MAX_H)
+        );
+    }
+
+    #[test]
+    fn scrollbar_thumb_reaches_both_ends() {
+        let panel = RECT {
+            left: 100,
+            top: 100,
+            right: 660,
+            bottom: 520,
+        };
+        let top = panel_scrollbar_thumb_rect(panel, 1.0, 1000, 300, 0);
+        let bottom = panel_scrollbar_thumb_rect(panel, 1.0, 1000, 300, 700);
+        let track = panel_scrollbar_track_rect(panel, 1.0);
+        assert_eq!(top.top, track.top);
+        assert_eq!(bottom.bottom, track.bottom);
+    }
+
+    #[test]
     fn bar_matches_reference_metrics() {
         let (w, h) = bar_size(1.0);
         assert_eq!(h, 36, "工具条高 36px（5px padding + 26px 按钮）");
         assert_eq!(w, 132, "两个 60px 按钮 + 2px 间距 + 10px padding");
-        let bar = RECT { left: 10, top: 20, right: 10 + w, bottom: 20 + h };
+        let bar = RECT {
+            left: 10,
+            top: 20,
+            right: 10 + w,
+            bottom: 20 + h,
+        };
         let [copy, _] = button_rects(bar, 1.0);
         assert_eq!(copy.top - bar.top, 5);
         assert_eq!(copy.bottom - copy.top, 26);
@@ -223,10 +405,18 @@ mod tests {
     fn buttons_keep_the_same_gap_at_any_dpi() {
         for s in [1.0, 1.25, 1.5, 2.0] {
             let (w, _) = bar_size(s);
-            let bar = RECT { left: 0, top: 0, right: w, bottom: scale(36, s) };
+            let bar = RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: scale(36, s),
+            };
             let [copy, trans] = button_rects(bar, s);
             assert!(trans.left >= copy.right, "按钮不应重叠（scale {s}）");
-            assert!(trans.right <= bar.right - scale(PAD, s), "按钮不应越界（scale {s}）");
+            assert!(
+                trans.right <= bar.right - scale(PAD, s),
+                "按钮不应越界（scale {s}）"
+            );
         }
     }
 }
